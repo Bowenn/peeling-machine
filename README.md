@@ -4,14 +4,15 @@ Peeling Machine is a developer tool for capturing and inspecting local HTTP/HTTP
 
 ## Status
 
-**Phases 1–2 shipped.** The proxy, the REST + SSE API, and the React GUI are all in place:
+**Phases 1–2 + 3a–3b shipped.** The proxy, the REST + SSE API, the React GUI, the CA-download safety interstitial, and single-upstream proxy chaining are all in place:
 
 - HTTP and HTTPS traffic routed through the proxy is captured with full headers and bodies.
 - Captures are exposed over a REST + Server-Sent Events API on a second port.
-- Root CA is auto-generated on first run; per-host leaf certs are signed on demand.
+- Root CA is auto-generated on first run; per-host leaf certs are signed on demand. CA download is gated behind a two-checkbox interstitial and the CLI `ca export` emits a `WARN:` banner on stderr.
 - A React + TypeScript GUI (in `web/`) is embedded into the Go binary via `//go:embed` and served from the API port — `go build` ships a single self-contained binary.
+- The proxy can chain upstream to an HTTP or SOCKS5 proxy via `--upstream-http` / `--upstream-socks5`.
 
-Chained upstream proxies, persistence, and request replay (Phase 3+) are still planned. See [`docs/plan.md`](docs/plan.md).
+Per-host proxy rules, persistence, and request replay (Phase 3c+) are still planned. See [`docs/plan.md`](docs/plan.md).
 
 ## Quick start
 
@@ -45,6 +46,8 @@ The repo ships a placeholder `web/dist/index.html` so `go build ./...` works bef
 | `--ca-dir` | `~/.peeling-machine` | where the root CA lives |
 | `--buffer-size` | `1000` | in-memory capture ring size |
 | `--body-cap` | `1048576` | per-body byte cap for captures |
+| `--upstream-http` | *(none)* | chain through an HTTP upstream proxy (e.g. `http://user:pass@host:8080`) |
+| `--upstream-socks5` | *(none)* | chain through a SOCKS5 proxy (e.g. `host:1080` or `socks5://user:pass@host:1080`) |
 
 ## Routing traffic through the proxy
 
@@ -58,6 +61,20 @@ curl --cacert "$(go run ./cmd/peeling-machine ca export)" \
 ```
 
 For a browser, set HTTP/HTTPS proxy to `localhost:8080` and import the CA (downloadable at `http://localhost:9090/api/ca`) into the OS / browser trust store.
+
+## Chaining through an upstream proxy
+
+By default Peeling Machine connects straight to origin servers. To route upstream traffic through another proxy — e.g. a corporate HTTP proxy or a SOCKS5 tunnel — pass exactly one of:
+
+```bash
+# HTTP (or HTTPS) upstream proxy. Basic auth in the URL becomes Proxy-Authorization.
+go run ./cmd/peeling-machine --upstream-http=http://user:pass@corp-proxy.local:8080
+
+# SOCKS5 upstream. Accepts bare host:port or a full socks5:// URL.
+go run ./cmd/peeling-machine --upstream-socks5=socks5://user:pass@127.0.0.1:1080
+```
+
+If both are set, `--upstream-http` wins and a warning is logged. The selected upstream is logged at startup with credentials redacted.
 
 ## Security
 

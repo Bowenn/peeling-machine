@@ -13,8 +13,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -49,6 +51,8 @@ func run(args []string) error {
 	fs.StringVar(&cfg.CADir, "ca-dir", cfg.CADir, "directory for root CA material")
 	fs.IntVar(&cfg.BufferSize, "buffer-size", cfg.BufferSize, "in-memory capture ring size")
 	fs.Int64Var(&cfg.BodyCap, "body-cap", cfg.BodyCap, "per-body byte cap for captures")
+	fs.StringVar(&cfg.UpstreamHTTP, "upstream-http", cfg.UpstreamHTTP, "chain through an HTTP upstream proxy, e.g. http://user:pass@host:8080")
+	fs.StringVar(&cfg.UpstreamSOCKS5, "upstream-socks5", cfg.UpstreamSOCKS5, "chain through a SOCKS5 proxy, e.g. host:1080 or socks5://user:pass@host:1080")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -60,12 +64,18 @@ func run(args []string) error {
 	if err != nil {
 		return fmt.Errorf("ca: %w", err)
 	}
+
+	upstream, upstreamKind, err := buildUpstream(cfg, logger)
+	if err != nil {
+		return fmt.Errorf("upstream: %w", err)
+	}
+
 	store := capture.NewStore(cfg.BufferSize)
-	proxySrv := proxy.New(cfg.ProxyAddr, rootCA, store, transport.Direct(), cfg.BodyCap, logger)
+	proxySrv := proxy.New(cfg.ProxyAddr, rootCA, store, upstream, cfg.BodyCap, logger)
 	apiSrv := api.New(cfg.APIAddr, store, rootCA)
 
 	logger.Info("peeling-machine starting",
-		"proxy", cfg.ProxyAddr, "api", cfg.APIAddr, "ca", rootCA.CertPath())
+		"proxy", cfg.ProxyAddr, "api", cfg.APIAddr, "ca", rootCA.CertPath(), "upstream", upstreamKind)
 
 	errCh := make(chan error, 2)
 	go func() {
@@ -94,6 +104,44 @@ func run(args []string) error {
 	_ = proxySrv.Shutdown(ctx)
 	_ = apiSrv.Shutdown(ctx)
 	return nil
+}
+
+// buildUpstream picks the RoundTripper based on flags. If both --upstream-http
+// and --upstream-socks5 are set, HTTP wins with a warning (matches plan.md).
+func buildUpstream(cfg config.Config, logger *slog.Logger) (transport.RoundTripper, string, error) {
+	httpURL := strings.TrimSpace(cfg.UpstreamHTTP)
+	socks5Addr := strings.TrimSpace(cfg.UpstreamSOCKS5)
+	if httpURL != "" && socks5Addr != "" {
+		logger.Warn("both --upstream-http and --upstream-socks5 set; using --upstream-http")
+		socks5Addr = ""
+	}
+	switch {
+	case httpURL != "":
+		rt, err := transport.HTTP(httpURL)
+		if err != nil {
+			return nil, "", err
+		}
+		return rt, "http:" + redactUpstream(httpURL), nil
+	case socks5Addr != "":
+		rt, err := transport.SOCKS5(socks5Addr)
+		if err != nil {
+			return nil, "", err
+		}
+		return rt, "socks5:" + redactUpstream(socks5Addr), nil
+	default:
+		return transport.Direct(), "direct", nil
+	}
+}
+
+// redactUpstream strips userinfo (credentials) from a proxy URL before it hits
+// logs. Bare host:port inputs are returned unchanged.
+func redactUpstream(s string) string {
+	u, err := url.Parse(s)
+	if err != nil || u.Host == "" {
+		return s
+	}
+	u.User = nil
+	return u.String()
 }
 
 func runCA(args []string) error {

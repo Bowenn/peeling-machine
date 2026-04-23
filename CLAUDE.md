@@ -54,7 +54,7 @@ The proxy is one `http.Server` on `:8080`; HTTPS is handled by hijacking `CONNEC
    - **Plain HTTP** flows through `handleHTTP`: clone request, strip hop-by-hop headers, forward via `transport.RoundTripper`, capture request + response, copy back.
    - **HTTPS** flows through `handleConnect`: hijack the TCP conn, write `200 Connection Established`, TLS-handshake as server using `ca.LeafFor` through a `GetCertificate` callback driven by SNI, then loop `http.ReadRequest` off the decrypted `*tls.Conn` and forward each one. This keeps the port speaking proxy protocol while parsing cleartext HTTP internally.
    - Hop-by-hop headers (`Connection`, `Proxy-Connection`, `Upgrade`, etc.) are stripped in both directions per RFC 7230 §6.1.
-4. `internal/transport` — pluggable upstream. `Direct()` returns a stdlib `http.Transport`; future phases will add chained upstream proxies (HTTP, SOCKS5, user-built) by swapping this interface. The rest of the code holds only `RoundTripper`.
+4. `internal/transport` — pluggable upstream. `Direct()` goes straight to origin; `HTTP(url)` chains through an upstream HTTP proxy (basic auth via URL userinfo → `Proxy-Authorization`); `SOCKS5(addr)` dials through a SOCKS5 proxy via `golang.org/x/net/proxy` wired as `DialContext`. CLI picks one via `--upstream-http` / `--upstream-socks5`; HTTP wins if both are set (with a warning). The rest of the code holds only `RoundTripper` so adding future chain types (rule-based dispatch in Phase 3c) is still a one-line swap.
 5. `internal/capture` — bounded ring buffer of `Exchange` records (default 1000) plus a fanout `Subscribe()` channel. Proxy calls `Begin → SetReqBody → SetResponse → Finish`; `Finish` pushes to subscribers with a non-blocking send so a slow SSE client can't stall the proxy path.
 6. `internal/api` — separate `http.Server` on `:9090` (so the proxy port only speaks proxy protocol). Endpoints are frozen in `docs/api.md`. This server also mounts the embedded SPA at `/`: non-`/api/*` paths are served from `web.DistFS()`, with a fallback to `index.html` so the React app owns client-side routes. `assets/*` keeps strict 404s — hashed asset names must not be rewritten.
 7. `web/` — Vite + React + TypeScript GUI. `web/embed.go` uses `//go:embed all:dist` to bake the built app into the Go binary. A committed stub `web/dist/index.html` ensures `go build` works before the first `npm run build`; it is overwritten by every real build.
@@ -76,6 +76,7 @@ The proxy is one `http.Server` on `:8080`; HTTPS is handled by hijacking `CONNEC
 - `internal/capture`: ring wrap, eviction from `byID`, subscribe delivery, cancel-is-idempotent.
 - `internal/proxy`: two `httptest` servers (origin + proxy) with a shared trust pool — this is how HTTPS interception is exercised without a real CA install.
 - `internal/api`: hit endpoints through `httptest.Server`; SSE tests need a short `time.Sleep` before pushing to let the subscriber register.
+- `internal/transport`: `HTTP()` is exercised with an "upstream" `httptest` server that records the absolute-form RequestURI and forwards to a second origin server — proves the chain and that URL userinfo becomes `Proxy-Authorization`. `SOCKS5()` is tested at the constructor level (input parsing / error cases); wire-level SOCKS5 behavior is covered by `golang.org/x/net/proxy`.
 
 ## GUI notes
 
@@ -86,4 +87,4 @@ The proxy is one `http.Server` on `:8080`; HTTPS is handled by hijacking `CONNEC
 
 ## Out of scope (current phase)
 
-No persistence, no chained upstream proxies, no request replay / breakpoints / rewrite rules. These are tracked in the plan file, not implemented here.
+No persistence, no per-host proxy rules, no request replay / breakpoints / rewrite rules. These are tracked in the plan file, not implemented here. Phase 3b added single-upstream chaining (HTTP + SOCKS5); Phase 3c will add JSON rule-based per-host dispatch on top of the same `transport.RoundTripper` seam.

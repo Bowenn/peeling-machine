@@ -127,7 +127,7 @@ Built in a second session against the frozen `docs/api.md` contract:
   the SPA at non-`/api/*` paths with `index.html` fallback and strict
   404s on `/assets/*`. `go build` produces a single self-contained binary.
 
-## Phase 3a — CA-download safety interstitial — [P0, ~1 session]
+## Phase 3a — CA-download safety interstitial — ✅ shipped
 
 The MITM CA is an attack primitive — installing it grants this process the
 ability to decrypt TLS from anything that trusts it. The GUI currently ships
@@ -156,7 +156,7 @@ a plain `<a download>` link; that's too low-friction for the consequences.
 - `README.md` — new `## Security` section.
 - `cmd/peeling-machine/main.go` — stderr banner in `runCA.export`.
 
-## Phase 3b — Upstream proxy chaining — [P1, 1–2 sessions]
+## Phase 3b — Upstream proxy chaining — ✅ shipped
 
 The `transport.RoundTripper` seam was built for this since Phase 1.
 `internal/transport/transport.go` only exposes `Direct()`; this phase adds
