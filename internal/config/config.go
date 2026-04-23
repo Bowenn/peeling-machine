@@ -13,6 +13,7 @@ type Config struct {
 	BodyCap        int64
 	UpstreamHTTP   string
 	UpstreamSOCKS5 string
+	ProxiesConfig  string
 }
 
 func Default() (Config, error) {

@@ -184,7 +184,7 @@ The `transport.RoundTripper` seam was built for this since Phase 1.
 - `cmd/peeling-machine/main.go`, `internal/config/config.go` — new flags.
 - `go.mod` — adds `golang.org/x/net/proxy`.
 
-## Phase 3c — Custom proxy rules via JSON config — [P1, 1 session, follows 3b]
+## Phase 3c — Custom proxy rules via JSON config — ✅ shipped
 
 Lets users define upstream chains per-host without recompiling. Plugin
 binaries are explicitly deferred — Go plugins are platform-fragile and

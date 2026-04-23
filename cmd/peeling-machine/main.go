@@ -53,6 +53,7 @@ func run(args []string) error {
 	fs.Int64Var(&cfg.BodyCap, "body-cap", cfg.BodyCap, "per-body byte cap for captures")
 	fs.StringVar(&cfg.UpstreamHTTP, "upstream-http", cfg.UpstreamHTTP, "chain through an HTTP upstream proxy, e.g. http://user:pass@host:8080")
 	fs.StringVar(&cfg.UpstreamSOCKS5, "upstream-socks5", cfg.UpstreamSOCKS5, "chain through a SOCKS5 proxy, e.g. host:1080 or socks5://user:pass@host:1080")
+	fs.StringVar(&cfg.ProxiesConfig, "proxies-config", cfg.ProxiesConfig, "JSON rules file for per-host upstream dispatch (see docs/proxies.md); overrides --upstream-http/--upstream-socks5")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -106,11 +107,29 @@ func run(args []string) error {
 	return nil
 }
 
-// buildUpstream picks the RoundTripper based on flags. If both --upstream-http
-// and --upstream-socks5 are set, HTTP wins with a warning (matches plan.md).
+// buildUpstream picks the RoundTripper based on flags. Precedence:
+//  1. --proxies-config — per-host rules file, with a hot-reload watcher.
+//  2. --upstream-http — single HTTP upstream for everything.
+//  3. --upstream-socks5 — single SOCKS5 upstream for everything.
+//  4. direct.
+// Higher-priority flags win with a warning if lower-priority flags are also
+// set, so the user notices that their config is being ignored.
 func buildUpstream(cfg config.Config, logger *slog.Logger) (transport.RoundTripper, string, error) {
+	rulesPath := strings.TrimSpace(cfg.ProxiesConfig)
 	httpURL := strings.TrimSpace(cfg.UpstreamHTTP)
 	socks5Addr := strings.TrimSpace(cfg.UpstreamSOCKS5)
+
+	if rulesPath != "" {
+		if httpURL != "" || socks5Addr != "" {
+			logger.Warn("--proxies-config overrides --upstream-http/--upstream-socks5")
+		}
+		rt, err := transport.RulesFromFile(rulesPath, logger)
+		if err != nil {
+			return nil, "", err
+		}
+		return rt, "rules:" + rulesPath, nil
+	}
+
 	if httpURL != "" && socks5Addr != "" {
 		logger.Warn("both --upstream-http and --upstream-socks5 set; using --upstream-http")
 		socks5Addr = ""

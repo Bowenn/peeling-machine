@@ -4,15 +4,15 @@ Peeling Machine is a developer tool for capturing and inspecting local HTTP/HTTP
 
 ## Status
 
-**Phases 1–2 + 3a–3b shipped.** The proxy, the REST + SSE API, the React GUI, the CA-download safety interstitial, and single-upstream proxy chaining are all in place:
+**Phases 1–2 + 3a–3c shipped.** The proxy, the REST + SSE API, the React GUI, the CA-download safety interstitial, single-upstream proxy chaining, and per-host rule-based proxy chaining are all in place:
 
 - HTTP and HTTPS traffic routed through the proxy is captured with full headers and bodies.
 - Captures are exposed over a REST + Server-Sent Events API on a second port.
 - Root CA is auto-generated on first run; per-host leaf certs are signed on demand. CA download is gated behind a two-checkbox interstitial and the CLI `ca export` emits a `WARN:` banner on stderr.
 - A React + TypeScript GUI (in `web/`) is embedded into the Go binary via `//go:embed` and served from the API port — `go build` ships a single self-contained binary.
-- The proxy can chain upstream to an HTTP or SOCKS5 proxy via `--upstream-http` / `--upstream-socks5`.
+- The proxy can chain upstream via a single `--upstream-http` / `--upstream-socks5`, or via a JSON rules file (`--proxies-config`) that maps host globs to upstreams with hot reload.
 
-Per-host proxy rules, persistence, and request replay (Phase 3c+) are still planned. See [`docs/plan.md`](docs/plan.md).
+Persistence, filters/views, and request replay (Phase 4+) are still planned. See [`docs/plan.md`](docs/plan.md).
 
 ## Quick start
 
@@ -48,6 +48,7 @@ The repo ships a placeholder `web/dist/index.html` so `go build ./...` works bef
 | `--body-cap` | `1048576` | per-body byte cap for captures |
 | `--upstream-http` | *(none)* | chain through an HTTP upstream proxy (e.g. `http://user:pass@host:8080`) |
 | `--upstream-socks5` | *(none)* | chain through a SOCKS5 proxy (e.g. `host:1080` or `socks5://user:pass@host:1080`) |
+| `--proxies-config` | *(none)* | JSON rules file for per-host upstream dispatch — see [`docs/proxies.md`](docs/proxies.md). Overrides the two flags above. |
 
 ## Routing traffic through the proxy
 
@@ -75,6 +76,22 @@ go run ./cmd/peeling-machine --upstream-socks5=socks5://user:pass@127.0.0.1:1080
 ```
 
 If both are set, `--upstream-http` wins and a warning is logged. The selected upstream is logged at startup with credentials redacted.
+
+### Per-host rules
+
+For finer control, point `--proxies-config` at a JSON file that maps host globs to upstreams:
+
+```json
+{
+  "rules": [
+    { "match": { "host": "*.corp.internal" }, "via": "http://corp-proxy:8080" },
+    { "match": { "host": "api.example.com" }, "via": "direct" },
+    { "match": { "host": "*" },                "via": "socks5://127.0.0.1:1080" }
+  ]
+}
+```
+
+Rules are evaluated top to bottom, first match wins, and edits to the file are picked up within a couple of seconds — no restart. A broken edit keeps the previous ruleset serving. Full schema in [`docs/proxies.md`](docs/proxies.md).
 
 ## Security
 
