@@ -9,7 +9,7 @@ Peeling Machine is a local HTTP/HTTPS debugging proxy. It MITM-intercepts TLS us
 The codebase splits along two deliberately separated boundaries:
 
 - **Go core** (this repo): proxy, CA, capture store, API. Lives on two localhost ports.
-- **React GUI** (future, separate session): consumes the API contract frozen in `docs/api.md`.
+- **React GUI** (`web/`): Vite + React + TypeScript. Built artifacts in `web/dist` are embedded into the Go binary (`//go:embed` in `web/embed.go`) and served by `internal/api` at non-`/api/*` paths. Consumes the API contract in `docs/api.md`.
 
 ## Common Commands
 
@@ -34,7 +34,15 @@ go run ./cmd/peeling-machine ca export
 
 # Vet
 go vet ./...
+
+# GUI: first-time install + build (produces web/dist that the Go binary embeds)
+cd web && pnpm install && pnpm run build
+
+# GUI dev loop (Vite on :5173 with /api proxied to the Go server on :9090)
+cd web && pnpm run dev
 ```
+
+The GUI uses pnpm; do not commit `package-lock.json` or `yarn.lock` (both are gitignored in `web/`).
 
 ## Architecture — the big picture
 
@@ -48,7 +56,8 @@ The proxy is one `http.Server` on `:8080`; HTTPS is handled by hijacking `CONNEC
    - Hop-by-hop headers (`Connection`, `Proxy-Connection`, `Upgrade`, etc.) are stripped in both directions per RFC 7230 §6.1.
 4. `internal/transport` — pluggable upstream. `Direct()` returns a stdlib `http.Transport`; future phases will add chained upstream proxies (HTTP, SOCKS5, user-built) by swapping this interface. The rest of the code holds only `RoundTripper`.
 5. `internal/capture` — bounded ring buffer of `Exchange` records (default 1000) plus a fanout `Subscribe()` channel. Proxy calls `Begin → SetReqBody → SetResponse → Finish`; `Finish` pushes to subscribers with a non-blocking send so a slow SSE client can't stall the proxy path.
-6. `internal/api` — separate `http.Server` on `:9090` (so the proxy port only speaks proxy protocol). Endpoints are frozen in `docs/api.md`; the GUI session reads that file as its source of truth.
+6. `internal/api` — separate `http.Server` on `:9090` (so the proxy port only speaks proxy protocol). Endpoints are frozen in `docs/api.md`. This server also mounts the embedded SPA at `/`: non-`/api/*` paths are served from `web.DistFS()`, with a fallback to `index.html` so the React app owns client-side routes. `assets/*` keeps strict 404s — hashed asset names must not be rewritten.
+7. `web/` — Vite + React + TypeScript GUI. `web/embed.go` uses `//go:embed all:dist` to bake the built app into the Go binary. A committed stub `web/dist/index.html` ensures `go build` works before the first `npm run build`; it is overwritten by every real build.
 
 ## Key invariants
 
@@ -68,6 +77,13 @@ The proxy is one `http.Server` on `:8080`; HTTPS is handled by hijacking `CONNEC
 - `internal/proxy`: two `httptest` servers (origin + proxy) with a shared trust pool — this is how HTTPS interception is exercised without a real CA install.
 - `internal/api`: hit endpoints through `httptest.Server`; SSE tests need a short `time.Sleep` before pushing to let the subscriber register.
 
+## GUI notes
+
+- The React app is a single-page dashboard: toolbar (filter / method / clear / CA download / SSE status), request list, detail pane with Request/Response tabs, headers table, and body viewer that auto-pretty-prints JSON and hex-dumps binary payloads.
+- `src/useLiveExchanges.ts` combines `GET /api/exchanges` for backfill with an `EventSource` on `/api/stream`; de-duplicates by `id` in case the two overlap.
+- Bodies from the API are base64-encoded `[]byte`. `src/body.ts` decodes to UTF-8 when possible, falling back to a hex preview.
+- In dev, Vite proxies `/api` → `:9090` (see `web/vite.config.ts`), so the browser sees a single origin either way (served by Go in prod, proxied by Vite in dev).
+
 ## Out of scope (current phase)
 
-No React UI, no persistence, no chained upstream proxies, no request replay / breakpoints / rewrite rules. These are tracked in the plan file, not implemented here.
+No persistence, no chained upstream proxies, no request replay / breakpoints / rewrite rules. These are tracked in the plan file, not implemented here.

@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/api.ts","./src/body.ts","./src/main.tsx","./src/types.ts","./src/useliveexchanges.ts","./src/components/exchangedetail.tsx","./src/components/exchangelist.tsx","./src/components/toolbar.tsx"],"version":"5.9.3"}

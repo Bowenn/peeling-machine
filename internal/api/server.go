@@ -6,13 +6,16 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/bowen/peeling-machine/internal/ca"
 	"github.com/bowen/peeling-machine/internal/capture"
+	"github.com/bowen/peeling-machine/web"
 )
 
 type Server struct {
@@ -37,6 +40,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("ok"))
 	})
+	// Everything not under /api/ is the embedded React SPA.
+	mux.Handle("/", spaHandler(web.DistFS()))
 	return withCORS(mux)
 }
 
@@ -144,6 +149,29 @@ func withCORS(h http.Handler) http.Handler {
 			return
 		}
 		h.ServeHTTP(w, r)
+	})
+}
+
+// spaHandler serves files from the embedded GUI FS. Unknown paths fall back
+// to index.html so client-side routes (if any) still load. /assets/* keeps
+// its 404 behavior — hashed asset names should never be rewritten.
+func spaHandler(fsys fs.FS) http.Handler {
+	fileServer := http.FileServer(http.FS(fsys))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		clean := strings.TrimPrefix(r.URL.Path, "/")
+		if clean == "" {
+			fileServer.ServeHTTP(w, r)
+			return
+		}
+		if _, err := fs.Stat(fsys, clean); err != nil {
+			if errors.Is(err, fs.ErrNotExist) && !strings.HasPrefix(clean, "assets/") {
+				r2 := r.Clone(r.Context())
+				r2.URL.Path = "/"
+				fileServer.ServeHTTP(w, r2)
+				return
+			}
+		}
+		fileServer.ServeHTTP(w, r)
 	})
 }
 
