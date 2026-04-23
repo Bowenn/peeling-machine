@@ -59,6 +59,26 @@ curl --cacert "$(go run ./cmd/peeling-machine ca export)" \
 
 For a browser, set HTTP/HTTPS proxy to `localhost:8080` and import the CA (downloadable at `http://localhost:9090/api/ca`) into the OS / browser trust store.
 
+## Security
+
+Peeling Machine's root CA is an **attack primitive**. Any device that trusts it will accept forged certificates for **any** hostname from this process, which lets Peeling Machine decrypt every TLS connection on that device — not just traffic you intentionally route through the proxy.
+
+Before you install the CA, understand:
+
+- **Install only on devices you own.** Installing this CA on a machine you don't own is indistinguishable from an attacker planting a MITM certificate.
+- **Uninstall when finished.** Treat the CA like a debug-only backstage pass, not a permanent trust anchor. The private key lives in `~/.peeling-machine/ca.key` — anyone with access to that file and to your machine's network can decrypt TLS from any device that trusts the CA.
+- **The GUI enforces this with a two-checkbox interstitial** before the browser download; the `ca export` CLI prints a `WARN:` banner on stderr. `/api/ca` itself stays an unauthenticated raw PEM so scripted flows like `curl --cacert "$(peeling-machine ca export)" ...` keep working — the friction lives in the UX, not the endpoint.
+
+### Uninstalling the CA
+
+| Platform | How |
+| --- | --- |
+| macOS | Keychain Access → System/login → delete the `Peeling Machine` certificate. [Apple docs](https://support.apple.com/guide/keychain-access/remove-a-certificate-kyca3004/mac) |
+| Windows | `certmgr.msc` → Trusted Root Certification Authorities → Certificates → delete. [Microsoft docs](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/trusted-root-certification-authorities-certificate-store) |
+| Linux | Remove the PEM from `/usr/local/share/ca-certificates/` (Debian/Ubuntu) or `/etc/pki/ca-trust/source/anchors/` (RHEL/Fedora), then `update-ca-certificates` / `update-ca-trust`. [Ubuntu docs](https://ubuntu.com/server/docs/security-trust-store) |
+| iOS | Settings → General → VPN & Device Management → remove the profile; also turn off full trust in Settings → General → About → Certificate Trust Settings. [Apple docs](https://support.apple.com/guide/iphone/install-or-remove-configuration-profiles-iph6c493b19/ios) |
+| Android | Settings → Security → Encryption & credentials → User credentials → remove. [Google docs](https://support.google.com/pixelphone/answer/2844832) |
+
 ## API
 
 The GUI contract is frozen in [`docs/api.md`](docs/api.md). Key endpoints:

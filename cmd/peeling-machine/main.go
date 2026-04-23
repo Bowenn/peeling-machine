@@ -116,6 +116,7 @@ func runCA(args []string) error {
 		if err != nil {
 			return err
 		}
+		fmt.Fprintln(os.Stderr, "WARN: installing this CA lets peeling-machine decrypt TLS from anything that trusts it. Install only on devices you own, and uninstall when finished.")
 		fmt.Println(rootCA.CertPath())
 		return nil
 	default:

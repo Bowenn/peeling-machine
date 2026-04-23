@@ -1,5 +1,6 @@
-import { caDownloadUrl } from '../api';
+import { useState } from 'react';
 import type { Status } from '../useLiveExchanges';
+import { CaDownloadModal } from './CaDownloadModal';
 
 interface Props {
   status: Status;
@@ -24,6 +25,7 @@ export function Toolbar({
   methods,
   onClear,
 }: Props) {
+  const [caModalOpen, setCaModalOpen] = useState(false);
   return (
     <header className="toolbar">
       <div className="brand">
@@ -64,12 +66,14 @@ export function Toolbar({
 
       <div className="spacer" />
 
-      <a className="btn" href={caDownloadUrl()} download>
+      <button className="btn" onClick={() => setCaModalOpen(true)}>
         Download CA
-      </a>
+      </button>
       <button className="btn btn-danger" onClick={onClear}>
         Clear
       </button>
+
+      <CaDownloadModal open={caModalOpen} onClose={() => setCaModalOpen(false)} />
     </header>
   );
 }
