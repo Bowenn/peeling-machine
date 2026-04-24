@@ -4,14 +4,15 @@ Peeling Machine is a developer tool for capturing and inspecting local HTTP/HTTP
 
 ## Status
 
-**Phases 1–2 shipped.** The proxy, the REST + SSE API, and the React GUI are all in place:
+**Phases 1–2 + 3a–3c shipped.** The proxy, the REST + SSE API, the React GUI, the CA-download safety interstitial, single-upstream proxy chaining, and per-host rule-based proxy chaining are all in place:
 
 - HTTP and HTTPS traffic routed through the proxy is captured with full headers and bodies.
 - Captures are exposed over a REST + Server-Sent Events API on a second port.
-- Root CA is auto-generated on first run; per-host leaf certs are signed on demand.
+- Root CA is auto-generated on first run; per-host leaf certs are signed on demand. CA download is gated behind a two-checkbox interstitial and the CLI `ca export` emits a `WARN:` banner on stderr.
 - A React + TypeScript GUI (in `web/`) is embedded into the Go binary via `//go:embed` and served from the API port — `go build` ships a single self-contained binary.
+- The proxy can chain upstream via a single `--upstream-http` / `--upstream-socks5`, or via a JSON rules file (`--proxies-config`) that maps host globs to upstreams with hot reload.
 
-Chained upstream proxies, persistence, and request replay (Phase 3+) are still planned. See [`docs/plan.md`](docs/plan.md).
+Persistence, filters/views, and request replay (Phase 4+) are still planned. See [`docs/plan.md`](docs/plan.md).
 
 ## Quick start
 
@@ -45,6 +46,9 @@ The repo ships a placeholder `web/dist/index.html` so `go build ./...` works bef
 | `--ca-dir` | `~/.peeling-machine` | where the root CA lives |
 | `--buffer-size` | `1000` | in-memory capture ring size |
 | `--body-cap` | `1048576` | per-body byte cap for captures |
+| `--upstream-http` | *(none)* | chain through an HTTP upstream proxy (e.g. `http://user:pass@host:8080`) |
+| `--upstream-socks5` | *(none)* | chain through a SOCKS5 proxy (e.g. `host:1080` or `socks5://user:pass@host:1080`) |
+| `--proxies-config` | *(none)* | JSON rules file for per-host upstream dispatch — see [`docs/proxies.md`](docs/proxies.md). Overrides the two flags above. |
 
 ## Routing traffic through the proxy
 
@@ -58,6 +62,56 @@ curl --cacert "$(go run ./cmd/peeling-machine ca export)" \
 ```
 
 For a browser, set HTTP/HTTPS proxy to `localhost:8080` and import the CA (downloadable at `http://localhost:9090/api/ca`) into the OS / browser trust store.
+
+## Chaining through an upstream proxy
+
+By default Peeling Machine connects straight to origin servers. To route upstream traffic through another proxy — e.g. a corporate HTTP proxy or a SOCKS5 tunnel — pass exactly one of:
+
+```bash
+# HTTP (or HTTPS) upstream proxy. Basic auth in the URL becomes Proxy-Authorization.
+go run ./cmd/peeling-machine --upstream-http=http://user:pass@corp-proxy.local:8080
+
+# SOCKS5 upstream. Accepts bare host:port or a full socks5:// URL.
+go run ./cmd/peeling-machine --upstream-socks5=socks5://user:pass@127.0.0.1:1080
+```
+
+If both are set, `--upstream-http` wins and a warning is logged. The selected upstream is logged at startup with credentials redacted.
+
+### Per-host rules
+
+For finer control, point `--proxies-config` at a JSON file that maps host globs to upstreams:
+
+```json
+{
+  "rules": [
+    { "match": { "host": "*.corp.internal" }, "via": "http://corp-proxy:8080" },
+    { "match": { "host": "api.example.com" }, "via": "direct" },
+    { "match": { "host": "*" },                "via": "socks5://127.0.0.1:1080" }
+  ]
+}
+```
+
+Rules are evaluated top to bottom, first match wins, and edits to the file are picked up within a couple of seconds — no restart. A broken edit keeps the previous ruleset serving. Full schema in [`docs/proxies.md`](docs/proxies.md).
+
+## Security
+
+Peeling Machine's root CA is an **attack primitive**. Any device that trusts it will accept forged certificates for **any** hostname from this process, which lets Peeling Machine decrypt every TLS connection on that device — not just traffic you intentionally route through the proxy.
+
+Before you install the CA, understand:
+
+- **Install only on devices you own.** Installing this CA on a machine you don't own is indistinguishable from an attacker planting a MITM certificate.
+- **Uninstall when finished.** Treat the CA like a debug-only backstage pass, not a permanent trust anchor. The private key lives in `~/.peeling-machine/ca.key` — anyone with access to that file and to your machine's network can decrypt TLS from any device that trusts the CA.
+- **The GUI enforces this with a two-checkbox interstitial** before the browser download; the `ca export` CLI prints a `WARN:` banner on stderr. `/api/ca` itself stays an unauthenticated raw PEM so scripted flows like `curl --cacert "$(peeling-machine ca export)" ...` keep working — the friction lives in the UX, not the endpoint.
+
+### Uninstalling the CA
+
+| Platform | How |
+| --- | --- |
+| macOS | Keychain Access → System/login → delete the `Peeling Machine` certificate. [Apple docs](https://support.apple.com/guide/keychain-access/remove-a-certificate-kyca3004/mac) |
+| Windows | `certmgr.msc` → Trusted Root Certification Authorities → Certificates → delete. [Microsoft docs](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/trusted-root-certification-authorities-certificate-store) |
+| Linux | Remove the PEM from `/usr/local/share/ca-certificates/` (Debian/Ubuntu) or `/etc/pki/ca-trust/source/anchors/` (RHEL/Fedora), then `update-ca-certificates` / `update-ca-trust`. [Ubuntu docs](https://ubuntu.com/server/docs/security-trust-store) |
+| iOS | Settings → General → VPN & Device Management → remove the profile; also turn off full trust in Settings → General → About → Certificate Trust Settings. [Apple docs](https://support.apple.com/guide/iphone/install-or-remove-configuration-profiles-iph6c493b19/ios) |
+| Android | Settings → Security → Encryption & credentials → User credentials → remove. [Google docs](https://support.google.com/pixelphone/answer/2844832) |
 
 ## API
 

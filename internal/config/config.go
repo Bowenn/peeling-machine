@@ -6,11 +6,14 @@ import (
 )
 
 type Config struct {
-	ProxyAddr  string
-	APIAddr    string
-	CADir      string
-	BufferSize int
-	BodyCap    int64
+	ProxyAddr      string
+	APIAddr        string
+	CADir          string
+	BufferSize     int
+	BodyCap        int64
+	UpstreamHTTP   string
+	UpstreamSOCKS5 string
+	ProxiesConfig  string
 }
 
 func Default() (Config, error) {
