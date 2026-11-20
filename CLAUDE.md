@@ -64,7 +64,10 @@ The proxy is one `http.Server` on `:8080`; HTTPS is handled by hijacking `CONNEC
 - **Two ports, two roles.** `:8080` is a proxy listener and must never serve API traffic; `:9090` is the API and must never accept proxy requests. Keep handlers cleanly separated.
 - **Capture path must not block on consumers.** `capture.Store.Finish` fans out with `select { case ch <- ex: default: }` — preserve that. A hung SSE client must not back up the proxy.
 - **The `transport.RoundTripper` seam is the only place upstream proxy chaining plugs in.** Don't leak `http.Transport` into `internal/proxy`.
-- **Body handling has two caps.** `BodyCap` (default 1 MiB) is what gets stored + shown. There is also a hard ceiling (10× BodyCap or 10 MiB, whichever is larger) when reading upstream to prevent OOM on huge responses; the difference between the two is what marks `truncated=true`.
+- **Bodies are streamed; only the capture is capped.** `BodyCap` (default 1 MiB) bounds what gets stored + shown — `truncated=true` means the real body was longer. The forwarded body is never cut: responses stream to the client through a `TeeReader` into a `capBuffer` (`internal/proxy/body.go`), chunked when length is unknown, so SSE / long-poll / huge downloads work and memory stays O(BodyCap). Request bodies are peeked up to the cap, then the rest streams.
+- **A body-less request must forward `http.NoBody`.** Any non-nil empty reader makes Go's HTTP/2 transport send HEADERS without END_STREAM plus an empty DATA frame; some CDNs (seen on Baidu) reset such streams mid-response.
+- **Upstream body failures must surface as client failures.** If the upstream body errors mid-stream, abort the client connection (`panic(http.ErrAbortHandler)` on the plain path, drop the conn on the CONNECT path) — never deliver a short body that looks complete.
+- **Upgrades are tunneled, not parsed.** `Upgrade` + `Connection` are kept for upgrade requests (`stripHopByHopKeepUpgrade`); on `101` the handshake is captured and `Finish`ed, then `splice` pipes raw bytes both ways.
 
 ## API contract
 
@@ -74,7 +77,7 @@ The proxy is one `http.Server` on `:8080`; HTTPS is handled by hijacking `CONNEC
 
 - `internal/ca`: verify root is `IsCA`, reload produces identical cert, leaf chains to root and is cached.
 - `internal/capture`: ring wrap, eviction from `byID`, subscribe delivery, cancel-is-idempotent.
-- `internal/proxy`: two `httptest` servers (origin + proxy) with a shared trust pool — this is how HTTPS interception is exercised without a real CA install.
+- `internal/proxy`: two `httptest` servers (origin + proxy) with a shared trust pool — this is how HTTPS interception is exercised without a real CA install. `forwarding_test.go` pins the forwarding invariants: body-less GET reaches an HTTP/2 origin with `ContentLength==0`, mid-body upstream failure is a client read error, SSE first event arrives while the origin is still streaming, >10 MiB bodies pass intact with a capped capture, and raw bytes echo after a `101` on both the HTTPS and plain paths.
 - `internal/api`: hit endpoints through `httptest.Server`; SSE tests need a short `time.Sleep` before pushing to let the subscriber register.
 - `internal/transport`: `HTTP()` is exercised with an "upstream" `httptest` server that records the absolute-form RequestURI and forwards to a second origin server — proves the chain and that URL userinfo becomes `Proxy-Authorization`. `SOCKS5()` is tested at the constructor level (input parsing / error cases); wire-level SOCKS5 behavior is covered by `golang.org/x/net/proxy`. `Ruleset` / `WatchedRules` tests cover glob matching, JSON schema (happy path + all error cases with `DisallowUnknownFields`), first-match-wins dispatch via two `httptest` upstreams, synchronous `Reload()`, reload-failure-keeps-previous, and the poll goroutine end-to-end (short interval + explicit mtime bump so the test is portable across filesystems with coarse mtime granularity).
 

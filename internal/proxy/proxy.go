@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -70,20 +71,27 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleHTTP forwards a plain HTTP proxy request and records the exchange.
+// The response body is streamed to the client (flushed per read) while a
+// capped copy is kept for capture.
 func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	ex := s.Store.Begin("http", r)
-	body, err := readAndReplace(r, s.BodyCap)
+	reqBody, err := prepareRequestBody(r, s.BodyCap)
 	if err != nil {
 		s.Store.SetError(ex, err)
 		s.Store.Finish(ex)
 		http.Error(w, "read request body: "+err.Error(), http.StatusBadGateway)
 		return
 	}
-	s.Store.SetReqBody(ex, body, s.BodyCap)
+	s.Store.SetReqBody(ex, reqBody, s.BodyCap)
 
 	out := r.Clone(r.Context())
 	out.RequestURI = ""
-	stripHopByHop(out.Header)
+	upgrade := isUpgrade(r.Header)
+	if upgrade {
+		stripHopByHopKeepUpgrade(out.Header)
+	} else {
+		stripHopByHop(out.Header)
+	}
 
 	resp, err := s.Upstream.RoundTrip(out)
 	if err != nil {
@@ -92,19 +100,53 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "upstream: "+err.Error(), http.StatusBadGateway)
 		return
 	}
+	if upgrade && resp.StatusCode == http.StatusSwitchingProtocols {
+		s.tunnelUpgradeHTTP(w, ex, resp)
+		return
+	}
 	defer resp.Body.Close()
 
-	respBody, rerr := readCapped(resp.Body, s.BodyCap)
-	if rerr != nil {
-		s.Store.SetError(ex, rerr)
-	}
-	s.Store.SetResponse(ex, resp, respBody, s.BodyCap)
-	s.Store.Finish(ex)
-
+	captured := resp.Header.Clone()
 	stripHopByHop(resp.Header)
 	copyHeader(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
-	_, _ = w.Write(respBody)
+
+	cb := &capBuffer{limit: captureLimit(s.BodyCap)}
+	rec := &errRecorder{r: io.TeeReader(resp.Body, cb)}
+	_, _ = io.Copy(flushWriter{w: w, rc: http.NewResponseController(w)}, rec)
+	s.finishCapture(ex, resp.StatusCode, captured, cb.buf, rec.err)
+	if rec.err != nil {
+		// Upstream broke mid-body. Abort the client connection so it sees a
+		// failure instead of a complete-looking short response.
+		panic(http.ErrAbortHandler)
+	}
+}
+
+// tunnelUpgradeHTTP completes a plain-HTTP protocol upgrade (ws://): relay
+// the 101 to the client, then splice raw bytes both ways.
+func (s *Server) tunnelUpgradeHTTP(w http.ResponseWriter, ex *capture.Exchange, resp *http.Response) {
+	upstream, ok := resp.Body.(io.ReadWriteCloser)
+	if !ok {
+		resp.Body.Close()
+		s.Store.SetError(ex, errors.New("upstream 101 response body is not writable"))
+		s.Store.Finish(ex)
+		http.Error(w, "upstream upgrade failed", http.StatusBadGateway)
+		return
+	}
+	s.finishCapture(ex, resp.StatusCode, resp.Header.Clone(), nil, nil)
+
+	conn, brw, err := http.NewResponseController(w).Hijack()
+	if err != nil {
+		upstream.Close()
+		s.Logger.Error("hijack for upgrade", "err", err)
+		return
+	}
+	if err := writeHandshake(conn, resp); err != nil {
+		conn.Close()
+		upstream.Close()
+		return
+	}
+	splice(conn, brw.Reader, upstream)
 }
 
 // handleConnect hijacks the client connection, terminates TLS using a forged
@@ -175,15 +217,20 @@ func (s *Server) serveDecrypted(ctx context.Context, conn net.Conn, authority st
 		req = req.WithContext(ctx)
 
 		ex := s.Store.Begin("https", req)
-		body, berr := readAndReplace(req, s.BodyCap)
+		reqBody, berr := prepareRequestBody(req, s.BodyCap)
 		if berr != nil {
 			s.Store.SetError(ex, berr)
 			s.Store.Finish(ex)
 			return
 		}
-		s.Store.SetReqBody(ex, body, s.BodyCap)
+		s.Store.SetReqBody(ex, reqBody, s.BodyCap)
 
-		stripHopByHop(req.Header)
+		upgrade := isUpgrade(req.Header)
+		if upgrade {
+			stripHopByHopKeepUpgrade(req.Header)
+		} else {
+			stripHopByHop(req.Header)
+		}
 		resp, err := s.Upstream.RoundTrip(req)
 		if err != nil {
 			s.Store.SetError(ex, err)
@@ -192,86 +239,108 @@ func (s *Server) serveDecrypted(ctx context.Context, conn net.Conn, authority st
 			return
 		}
 
-		respBody, rerr := readCapped(resp.Body, s.BodyCap)
-		resp.Body.Close()
-		if rerr != nil {
-			s.Store.SetError(ex, rerr)
-		}
-		s.Store.SetResponse(ex, resp, respBody, s.BodyCap)
-		s.Store.Finish(ex)
-
-		stripHopByHop(resp.Header)
-		if err := writeResponse(conn, resp, respBody); err != nil {
+		if upgrade && resp.StatusCode == http.StatusSwitchingProtocols {
+			upstream, ok := resp.Body.(io.ReadWriteCloser)
+			if !ok {
+				resp.Body.Close()
+				err := errors.New("upstream 101 response body is not writable")
+				s.Store.SetError(ex, err)
+				s.Store.Finish(ex)
+				writeBadGateway(conn, err)
+				return
+			}
+			s.finishCapture(ex, resp.StatusCode, resp.Header.Clone(), nil, nil)
+			if err := writeHandshake(conn, resp); err != nil {
+				upstream.Close()
+				return
+			}
+			// br may already hold bytes the client sent after the handshake.
+			splice(conn, br, upstream)
 			return
 		}
-		if resp.Close || req.Close {
+
+		if !s.writeStreamedResponse(conn, req, resp, ex) {
 			return
 		}
 	}
+}
+
+// writeStreamedResponse relays resp to the decrypted client conn as HTTP/1.1,
+// streaming the body (chunked when the length is unknown) while capturing a
+// capped copy. It reports whether the connection can serve another request.
+func (s *Server) writeStreamedResponse(conn net.Conn, req *http.Request, resp *http.Response, ex *capture.Exchange) bool {
+	defer resp.Body.Close()
+	captured := resp.Header.Clone()
+	stripHopByHop(resp.Header)
+
+	cb := &capBuffer{limit: captureLimit(s.BodyCap)}
+	rec := &errRecorder{r: io.TeeReader(resp.Body, cb)}
+	out := &http.Response{
+		Status:        resp.Status,
+		StatusCode:    resp.StatusCode,
+		Proto:         "HTTP/1.1", // client side is always HTTP/1.1, whatever upstream spoke
+		ProtoMajor:    1,
+		ProtoMinor:    1,
+		Header:        resp.Header,
+		ContentLength: resp.ContentLength,
+		Body:          io.NopCloser(rec),
+		Request:       req,
+		Close:         req.Close,
+	}
+	if !bodyAllowed(req.Method, resp.StatusCode) {
+		out.Body = http.NoBody
+		if out.ContentLength < 0 {
+			out.ContentLength = 0
+		}
+	} else if resp.ContentLength < 0 {
+		out.TransferEncoding = []string{"chunked"}
+	}
+
+	// Writes go straight to the TLS conn, so each chunk reaches the client
+	// as soon as upstream produces it (SSE, long-poll, streamed downloads).
+	werr := out.Write(conn)
+	s.finishCapture(ex, resp.StatusCode, captured, cb.buf, rec.err)
+	// On an upstream read error the response is incomplete (no final chunk /
+	// short Content-Length); closing the conn makes the client see a failure.
+	return werr == nil && rec.err == nil && !out.Close
+}
+
+// finishCapture records the response half of an exchange and publishes it.
+func (s *Server) finishCapture(ex *capture.Exchange, status int, hdr http.Header, body []byte, upErr error) {
+	s.Store.SetResponse(ex, &http.Response{StatusCode: status, Header: hdr}, body, s.BodyCap)
+	if upErr != nil {
+		s.Store.SetError(ex, upErr)
+	}
+	s.Store.Finish(ex)
 }
 
 // --- helpers ---
 
-// hopByHop headers per RFC 7230 §6.1. Not forwarded.
-var hopByHop = []string{
-	"Connection",
-	"Proxy-Connection",
-	"Keep-Alive",
-	"Proxy-Authenticate",
-	"Proxy-Authorization",
-	"Te",
-	"Trailer",
-	"Transfer-Encoding",
-	"Upgrade",
+// flushWriter flushes after every write so streamed bodies reach the client
+// as they arrive.
+type flushWriter struct {
+	w  http.ResponseWriter
+	rc *http.ResponseController
 }
 
-func stripHopByHop(h http.Header) {
-	for _, k := range hopByHop {
-		h.Del(k)
+func (f flushWriter) Write(p []byte) (int, error) {
+	n, err := f.w.Write(p)
+	if err == nil {
+		err = f.rc.Flush()
 	}
+	return n, err
 }
 
-func copyHeader(dst, src http.Header) {
-	for k, vs := range src {
-		for _, v := range vs {
-			dst.Add(k, v)
-		}
-	}
-}
-
-// readAndReplace drains the request body up to a hard ceiling, stores a copy
-// for capture, and replaces r.Body so the round-tripper can re-send it.
-func readAndReplace(r *http.Request, cap int64) ([]byte, error) {
-	if r.Body == nil {
-		return nil, nil
-	}
-	defer r.Body.Close()
-	// Hard ceiling is 10x body cap or 10MiB, whichever is larger, to bound memory.
-	ceiling := cap * 10
-	if ceiling < 10<<20 {
-		ceiling = 10 << 20
-	}
-	buf, err := io.ReadAll(io.LimitReader(r.Body, ceiling))
-	if err != nil {
-		return nil, err
-	}
-	r.Body = io.NopCloser(bytes.NewReader(buf))
-	r.ContentLength = int64(len(buf))
-	return buf, nil
-}
-
-func readCapped(r io.Reader, cap int64) ([]byte, error) {
-	ceiling := cap * 10
-	if ceiling < 10<<20 {
-		ceiling = 10 << 20
-	}
-	return io.ReadAll(io.LimitReader(r, ceiling))
-}
-
-func writeResponse(w io.Writer, resp *http.Response, body []byte) error {
-	resp.Body = io.NopCloser(bytes.NewReader(body))
-	resp.ContentLength = int64(len(body))
-	return resp.Write(w)
+// writeHandshake relays an upstream 101 Switching Protocols to the client.
+func writeHandshake(w io.Writer, resp *http.Response) error {
+	h := resp.Header.Clone()
+	stripHopByHopKeepUpgrade(h)
+	var b bytes.Buffer
+	fmt.Fprintf(&b, "HTTP/1.1 %d %s\r\n", resp.StatusCode, http.StatusText(resp.StatusCode))
+	_ = h.Write(&b)
+	b.WriteString("\r\n")
+	_, err := w.Write(b.Bytes())
+	return err
 }
 
 func writeBadGateway(w io.Writer, err error) {

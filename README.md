@@ -6,7 +6,8 @@ Peeling Machine is a developer tool for capturing and inspecting local HTTP/HTTP
 
 **Phases 1–2 + 3a–3c shipped.** The proxy, the REST + SSE API, the React GUI, the CA-download safety interstitial, single-upstream proxy chaining, and per-host rule-based proxy chaining are all in place:
 
-- HTTP and HTTPS traffic routed through the proxy is captured with full headers and bodies.
+- HTTP and HTTPS traffic routed through the proxy is captured with full headers and bodies (stored copy capped at 1 MiB per body, flagged `truncated`).
+- Bodies are streamed, not buffered: server-sent events and long-poll responses reach the browser as they arrive, and large downloads/uploads pass through intact whatever the capture cap. WebSocket (`ws://` / `wss://`) upgrades are tunneled; only the handshake is captured.
 - Captures are exposed over a REST + Server-Sent Events API on a second port.
 - Root CA is auto-generated on first run; per-host leaf certs are signed on demand. CA download is gated behind a two-checkbox interstitial and the CLI `ca export` emits a `WARN:` banner on stderr.
 - A React + TypeScript GUI (in `web/`) is embedded into the Go binary via `//go:embed` and served from the API port — `go build` ships a single self-contained binary.
