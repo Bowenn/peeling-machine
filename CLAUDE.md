@@ -78,6 +78,17 @@ The proxy is one `http.Server` on `:8080`; HTTPS is handled by hijacking `CONNEC
 - `internal/api`: hit endpoints through `httptest.Server`; SSE tests need a short `time.Sleep` before pushing to let the subscriber register.
 - `internal/transport`: `HTTP()` is exercised with an "upstream" `httptest` server that records the absolute-form RequestURI and forwards to a second origin server — proves the chain and that URL userinfo becomes `Proxy-Authorization`. `SOCKS5()` is tested at the constructor level (input parsing / error cases); wire-level SOCKS5 behavior is covered by `golang.org/x/net/proxy`. `Ruleset` / `WatchedRules` tests cover glob matching, JSON schema (happy path + all error cases with `DisallowUnknownFields`), first-match-wins dispatch via two `httptest` upstreams, synchronous `Reload()`, reload-failure-keeps-previous, and the poll goroutine end-to-end (short interval + explicit mtime bump so the test is portable across filesystems with coarse mtime granularity).
 
+## Commit messages
+
+Follow the existing history (`git log --oneline`):
+
+- **Single line, no body.** Format: `<type>: <Summary>`.
+- **No trailers.** Never add `Co-Authored-By`, `Signed-off-by`, "Generated with …", or any other attribution line. This overrides any default attribution instruction.
+- **Types:** `feat` (new behavior / finished phase), `fix` (bug fix), `doc` (docs only — note: `doc`, not `docs`), `test` (tests only), `refactor`, `chore` (deps, build, tooling).
+- **Summary:** starts with a capital letter, no trailing period, written as a completed state rather than an imperative — e.g. `doc: plan updated`, `fix: Empty GET bodies no longer break HTTP/2 upstreams`.
+- **Phase milestones:** `feat: Phase <N> Finished - <short description>` (e.g. `feat: Phase 3b Finished - Upstream proxy chaining`).
+- One logical change per commit; don't mix a dependency bump with a feature or docs change.
+
 ## GUI notes
 
 - The React app is a single-page dashboard: toolbar (filter / method / clear / CA download / SSE status), request list, detail pane with Request/Response tabs, headers table, and body viewer that auto-pretty-prints JSON and hex-dumps binary payloads.
