@@ -61,7 +61,24 @@ curl --cacert "$(go run ./cmd/peeling-machine ca export)" \
      -x http://localhost:8080 https://example.com/
 ```
 
-For a browser, set HTTP/HTTPS proxy to `localhost:8080` and import the CA (downloadable at `http://localhost:9090/api/ca`) into the OS / browser trust store.
+For a browser, set HTTP/HTTPS proxy to `localhost:8080` and import the CA (downloadable at `http://localhost:9090/api/ca`) into the OS / browser trust store. Read [Security](#security) first.
+
+#### Installing the CA on macOS
+
+Use the command line. Double-clicking the `.crt` imports into whatever keychain is selected in the Keychain Access sidebar. If that's **iCloud** or **Local Items**, the import fails with `Error: -25294` ("The specified keychain could not be found").
+
+```bash
+# All users (System keychain, asks for your admin password):
+sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ~/.peeling-machine/ca.crt
+
+# Or only your user (login keychain, macOS shows a password prompt):
+security add-trusted-cert -r trustRoot -k ~/Library/Keychains/login.keychain-db ~/.peeling-machine/ca.crt
+
+# Verify: should report success, not CSSMERR_TP_NOT_TRUSTED
+security verify-cert -c ~/.peeling-machine/ca.crt
+```
+
+If you prefer the GUI: open Keychain Access and select **login** in the sidebar first. Then use File → Import Items, double-click the imported cert, and set Trust to **Always Trust**. Firefox uses its own certificate store, so it won't see this unless its enterprise-roots setting is on.
 
 ## Chaining through an upstream proxy
 
@@ -107,7 +124,7 @@ Before you install the CA, understand:
 
 | Platform | How |
 | --- | --- |
-| macOS | Keychain Access → System/login → delete the `Peeling Machine` certificate. [Apple docs](https://support.apple.com/guide/keychain-access/remove-a-certificate-kyca3004/mac) |
+| macOS | `security delete-certificate -c "Peeling Machine Root CA"` (prefix `sudo` if installed in the System keychain), or Keychain Access → System/login → delete the `Peeling Machine` certificate. [Apple docs](https://support.apple.com/guide/keychain-access/remove-a-certificate-kyca3004/mac) |
 | Windows | `certmgr.msc` → Trusted Root Certification Authorities → Certificates → delete. [Microsoft docs](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/trusted-root-certification-authorities-certificate-store) |
 | Linux | Remove the PEM from `/usr/local/share/ca-certificates/` (Debian/Ubuntu) or `/etc/pki/ca-trust/source/anchors/` (RHEL/Fedora), then `update-ca-certificates` / `update-ca-trust`. [Ubuntu docs](https://ubuntu.com/server/docs/security-trust-store) |
 | iOS | Settings → General → VPN & Device Management → remove the profile; also turn off full trust in Settings → General → About → Certificate Trust Settings. [Apple docs](https://support.apple.com/guide/iphone/install-or-remove-configuration-profiles-iph6c493b19/ios) |
